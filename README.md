@@ -1,8 +1,8 @@
-# Trustworthy TinyML for IoMT: Explanation-Fidelity Trade-offs in Compressed Cardiac Risk Screening Models
+# Compression Strategy, Not Compression Ratio: Explanation-Fidelity Trade-offs in Quantized and Pruned Cardiac Risk Models
 
 Code, experiments, and reproducibility artifacts for the paper:
 
-> Md Irfanul Kabir Hira, Anichur Rahman, Md Shohel Rana. **"Trustworthy TinyML for IoMT: Explanation-Fidelity Trade-offs in Compressed Cardiac Risk Screening Models."**
+> Md Irfanul Kabir Hira, Anichur Rahman, Md Shohel Rana. **"Compression Strategy, Not Compression Ratio: Explanation-Fidelity Trade-offs in Quantized and Pruned Cardiac Risk Models."**
 
 This repository quantifies whether SHAP-based explanations survive model compression (float16, int8, and magnitude-pruning + int8 quantization) when a deep neural network (DNN) for cardiac risk screening is deployed to constrained IoMT edge hardware.
 
@@ -133,7 +133,7 @@ python src/edge_benchmark_device.py --variants artifacts/tflite/
 python src/shap_fidelity.py --reference artifacts/tflite/float32.tflite --variants artifacts/tflite/
 
 # 7. Multi-seed variance estimation
-python src/multiseed_variance.py --seeds 5 --config configs/pipeline.yaml
+python src/multiseed_variance.py --seeds 3 --config configs/pipeline.yaml
 
 # 8. Generate figures / tables
 python src/plotting.py --results results/
@@ -158,7 +158,7 @@ python src/plotting.py --results results/
 
 ## 7. Results
 
-Full results, figures, and tables are provided in the paper (Sections 4 and Tables 1–2) and reproduced under `results/`. Headline numbers:
+Full results, figures, and tables are provided in the paper (Section 4 and Tables 1–2) and reproduced under `results/`. Headline numbers:
 
 - **DNN (float32) AUC:** 0.930 | **Accuracy:** 0.882
 - **Random Forest AUC:** 0.980 | **Accuracy:** 0.933 (best raw accuracy, not the deployment target)
@@ -200,6 +200,7 @@ The full reference list corresponding to the paper's related-work and comparison
 - Edge latency/size benchmarks were obtained primarily via a cloud-CPU proxy; full-scale physical Raspberry Pi / ESP32 validation is packaged as a standalone script but not exhaustively reported.
 - The deployment-target DNN's raw accuracy trails Random Forest, reflecting a deliberate choice to prioritize a model family with a direct quantization/pruning pathway.
 - Fidelity was evaluated using SHAP only and magnitude pruning as the sole pruning strategy; generalization to other explainers (LIME, Integrated Gradients) or structured compression (distillation, channel pruning) is left to future work.
+- Only S = 3 seeds are used; intervals are wide and some pairwise comparisons (e.g., float16 vs. int8) are not statistically resolved.
 
 ---
 
@@ -208,10 +209,11 @@ The full reference list corresponding to the paper's related-work and comparison
 If you use this code or build on this work, please cite:
 
 ```bibtex
-@inproceedings{hira2026trustworthy,
-  title     = {Trustworthy TinyML for IoMT: Explanation-Fidelity Trade-offs in Compressed Cardiac Risk Screening Models},
+@inproceedings{hira2027compression,
+  title     = {Compression Strategy, Not Compression Ratio: Explanation-Fidelity Trade-offs in Quantized and Pruned Cardiac Risk Models},
   author    = {Hira, Md Irfanul Kabir and Rahman, Anichur and Rana, Md Shohel},
-  year      = {2026}
+  booktitle = {Proceedings of the 30th International Conference on Artificial Intelligence and Statistics (AISTATS)},
+  year      = {2027}
 }
 ```
 
@@ -225,4 +227,4 @@ Specify your license here (e.g., MIT, Apache 2.0). Add a `LICENSE` file to the r
 
 - Md Irfanul Kabir Hira — irfanhira11@niter.edu.bd
 - Anichur Rahman — ar36248@georgiasouthern.edu
-- Md Shohel Rana (Corresponding author) — mrana@georgiasouthern.edu / gudla@cse.msstate.edu
+- Md Shohel Rana (Corresponding author) — EMAIL-TO-CONFIRM
