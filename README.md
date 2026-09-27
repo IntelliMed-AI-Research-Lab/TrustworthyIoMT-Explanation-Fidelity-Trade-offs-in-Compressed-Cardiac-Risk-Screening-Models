@@ -1,230 +1,113 @@
 # Compression Strategy, Not Compression Ratio: Explanation-Fidelity Trade-offs in Quantized and Pruned Cardiac Risk Models
 
-Code, experiments, and reproducibility artifacts for the paper:
+> How much does compressing a cardiac-risk DNN for edge/IoMT deployment change its *explanations*, not just its accuracy? This repo trains, compresses, and audits a cardiac-risk classifier so that SHAP-based explanation fidelity — not just accuracy, latency, or size — determines what actually ships to the edge.
 
-> Md Irfanul Kabir Hira, Anichur Rahman, Md Shohel Rana. **"Compression Strategy, Not Compression Ratio: Explanation-Fidelity Trade-offs in Quantized and Pruned Cardiac Risk Models."**
+Wearable and bedside Internet-of-Medical-Things (IoMT) devices for cardiac risk screening must run on constrained hardware, which typically means compressing a neural network via quantization or pruning. Accuracy, latency, and size are the usual metrics for judging a compressed model — but none of them tell you whether the compressed model's *reasoning* still matches the original's. This project closes that gap.
 
-This repository quantifies whether SHAP-based explanations survive model compression (float16, int8, and magnitude-pruning + int8 quantization) when a deep neural network (DNN) for cardiac risk screening is deployed to constrained IoMT edge hardware.
+We train a DNN on the IEEE DataPort heart disease dataset (n = 1,190), compress it into `float16`, `int8`, and `pruned + int8` TensorFlow Lite variants, and measure how far each variant's SHAP attributions drift from the full-precision `float32` reference — using top-k rank agreement, Spearman rank correlation, and a new **Importance-Weighted Explanation Fidelity (IWEF)** metric, all computed with an *exact* Shapley explainer over 10 random seeds and benchmarked against an explicit estimator noise floor.
 
----
-
-## 1. Overview
-
-Wearable and bedside IoMT devices for cardiac risk screening must run on constrained edge hardware, which typically requires compressing deep learning models via quantization or pruning. Prior TinyML-for-health work benchmarks compression on **accuracy, latency, and memory footprint alone** — leaving open whether a compressed model's *explanations* still match those of its full-precision counterpart.
-
-This project addresses that gap by:
-
-1. Training a deployment-target DNN alongside classical baselines (**SVM, Random Forest, KNN**) on the IEEE DataPort heart disease dataset (D1, n = 1,190).
-2. Compressing the DNN into **four TensorFlow Lite variants**: float32 (reference), float16, int8, and pruned + int8.
-3. Benchmarking each variant on **accuracy, model size, and inference latency**.
-4. Quantifying **explanation-fidelity drift** between the float32 reference and each compressed variant using:
-   - Top-k SHAP feature-rank agreement (Jaccard index)
-   - Spearman rank correlation of SHAP attribution vectors
-   - McNemar's paired significance test on predictions
-   - Multi-seed variance estimation (95% CI)
-5. Cross-checking the DNN's global SHAP feature ranking against Random Forest's independent feature importances for clinical plausibility.
-6. Deriving a **three-tier IoMT edge–cloud architecture** that pairs a fidelity-optimized edge model with cloud-based full-precision confirmation for high-risk cases.
-
-### Key finding
-
-Explanation fidelity depends more on **how** a model is compressed than on model size alone:
-
-| Compression | Spearman ρ (vs. float32) | Top-k Jaccard |
-|---|---|---|
-| float16 | ≈ 0.87 | 0.73 |
-| int8 | ≈ 0.86 | 0.72 |
-| **pruned + int8** | **≈ 0.98** | **0.93** |
-
-Combining magnitude pruning with int8 quantization preserves SHAP explanation fidelity substantially better than quantization alone, at a comparable model footprint — even though it does **not** have the best raw accuracy.
+**Headline finding:** discriminative performance is comparable across variants (AUC 0.93–0.95), but fidelity is not. Quantization alone drifts *below* the noise floor (Spearman ρ ≈ 0.89 vs. a floor of ρ ≈ 0.97), while pruning before quantization *exceeds* it (ρ ≈ 0.99) despite lower raw accuracy. **Compression strategy, not compression ratio, determines whether a model stays explainable** — and that has to be measured directly, not assumed from accuracy.
 
 ---
 
-## 2. Repository Structure
+## Table of Contents
 
-```
-.
-├── data/
-│   ├── raw/                     # Original IEEE DataPort heart disease dataset (D1)
-│   └── processed/                # Imputed / standardized train-test splits
-├── src/
-│   ├── preprocessing.py          # Imputation, standardization, stratified splitting
-│   ├── train_baselines.py        # SVM / Random Forest / KNN training + grid search
-│   ├── train_dnn.py               # DNN hyperparameter search, class-weighted training
-│   ├── compress_tflite.py         # float32 / float16 / int8 / pruned+int8 conversion
-│   ├── benchmark_edge.py          # Latency & model-size benchmarking (cloud CPU proxy)
-│   ├── edge_benchmark_device.py   # Standalone script for Raspberry Pi / ESP32 execution
-│   ├── shap_fidelity.py           # SHAP computation, Jaccard, Spearman, McNemar's test
-│   ├── multiseed_variance.py      # Multi-seed pipeline repetition + CI estimation
-│   └── plotting.py                # Trade-off, ROC, confusion matrix, SHAP figures
-├── notebooks/
-│   └── analysis.ipynb             # End-to-end exploratory walkthrough
-├── results/
-│   ├── tables/                    # Table 1 & Table 2 outputs (CSV)
-│   ├── figures/                   # Fig. 1–3 reproductions
-│   └── reproducibility_manifest.json  # Seeds, hyperparameters, pruning sparsity, library versions
-├── requirements.txt
-├── LICENSE
-└── README.md
-```
+- [Why this matters](#why-this-matters)
+- [Pipeline overview](#pipeline-overview)
+- [Repository contents](#repository-contents)
+- [Key results](#key-results)
+- [Getting started](#getting-started)
+- [Reproducing the paper's numbers](#reproducing-the-papers-numbers)
+- [Exported artifacts](#exported-artifacts)
+- [Limitations](#limitations)
+- [Citation](#citation)
+- [License](#license)
 
-*(Adjust paths above to match your actual repository layout before publishing.)*
+## Why this matters
 
----
+Edge-AI health literature typically treats a compressed model as interchangeable with its full-precision counterpart once accuracy is preserved — explanations included. This assumption is rarely tested, even though compression is known to change model behavior in ways aggregate accuracy hides. Two models can agree on most predictions and still disagree on *why*. For clinical decision support, where SHAP-style attributions are what clinicians and patients actually see, that gap matters.
 
-## 3. Dataset
+To our knowledge, no prior cardiac-risk study has measured whether a compressed model's explanations survive quantization or pruning, or whether that survival depends on *which* compression technique is used rather than only on how aggressive it is.
 
-**IEEE DataPort Heart Disease Dataset (D1)**
-Combines the Cleveland, Hungarian, Switzerland, Long Beach VA, and Statlog heart disease cohorts.
+## Pipeline overview
 
-- **Samples:** 1,190 patient records
-- **Features:** 11 clinical features (age, sex, chest pain type, resting blood pressure, serum cholesterol, fasting blood sugar, resting ECG results, max heart rate, exercise-induced angina, oldpeak, ST slope)
-- **Target:** Binary presence/absence of heart disease
-- **Source:** Siddhartha, M. *Heart Disease Dataset (Comprehensive)*. IEEE DataPort. https://doi.org/10.21227/dz4t-cm36
+A seven-stage pipeline, fully reproduced in the accompanying notebook:
 
-> The dataset is not redistributed in this repository. Download it directly from IEEE DataPort and place it under `data/raw/`.
+1. **Data & preprocessing** — IEEE DataPort D1 (five merged cohorts, N = 1,190, 11 clinical features), disguised-missing-value imputation, standardization fit on the training partition only.
+2. **Stratified splits & multi-seed protocol** — 80/20 train/test, 85/15 train/validation, repeated over `S = 10` seeds.
+3. **Model training** — SVM / Random Forest / KNN baselines (5-fold grid search) plus a DNN tuned over a full 4×3×2 = 24-configuration grid (architecture × dropout × learning rate), trained with class-weighted cross-entropy.
+4. **TFLite compression** — four headline variants (`float32` reference, `float16`, `int8`, `pruned+int8`) plus two ablations (`finetune_only`, `pruned_f32`) that isolate fine-tuning and pruning effects from quantization.
+5. **Explanation-fidelity engine** (core contribution) — exact SHAP over all 2¹¹ = 2,048 feature coalitions for every test sample and variant; top-k Jaccard agreement, Spearman ρ, IWEF, an explicit float32-vs-float32 noise floor, McNemar's exact test for prediction-level change, and a Shapley-linearity bound on attribution rank swaps.
+6. **Uncertainty-aware tier selection** — Algorithm 1 selects the smallest compressed variant whose fidelity *and* accuracy clear operator-set thresholds at their lower 95% confidence bound, deferring to the cloud if none qualify.
+7. **Three-tier IoMT deployment** — wearable/sensor → edge gateway (compressed DNN) → cloud (float32 confirmatory inference on flagged high-risk cases).
 
----
+## Repository contents
 
-## 4. Installation
-
-```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
-python -m venv venv
-source venv/bin/activate    # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### Core dependencies
-
-- Python 3.10+
-- TensorFlow / Keras
-- TensorFlow Lite
-- `tensorflow-model-optimization` (magnitude pruning)
-- scikit-learn
-- SHAP
-- `tflite-runtime` (for physical edge-hardware benchmarking)
-- NumPy, pandas, matplotlib, scipy
-
----
-
-## 5. Usage
-
-```bash
-# 1. Preprocess data (imputation + standardization + stratified split)
-python src/preprocessing.py --input data/raw/D1.csv --output data/processed/
-
-# 2. Train classical baselines
-python src/train_baselines.py --data data/processed/
-
-# 3. Train and tune the deployment-target DNN
-python src/train_dnn.py --data data/processed/ --config configs/dnn_search.yaml
-
-# 4. Compress the trained DNN into four TFLite variants
-python src/compress_tflite.py --model artifacts/dnn_float32.keras --output artifacts/tflite/
-
-# 5. Benchmark latency & size (cloud-CPU proxy)
-python src/benchmark_edge.py --variants artifacts/tflite/
-
-# 5b. Benchmark on physical edge hardware (Raspberry Pi / ESP32)
-python src/edge_benchmark_device.py --variants artifacts/tflite/
-
-# 6. Compute SHAP explanation-fidelity metrics
-python src/shap_fidelity.py --reference artifacts/tflite/float32.tflite --variants artifacts/tflite/
-
-# 7. Multi-seed variance estimation
-python src/multiseed_variance.py --seeds 3 --config configs/pipeline.yaml
-
-# 8. Generate figures / tables
-python src/plotting.py --results results/
-```
-
----
-
-## 6. Methodology Summary
-
-| Stage | Description |
+| File | Description |
 |---|---|
-| 1. Data acquisition & preprocessing | Zero-value imputation (cholesterol, resting BP), z-score standardization |
-| 2. Stratified train/test split | 80/20 split, seed-controlled, class ratio preserved |
-| 3. Model training | SVM / RF / KNN (GridSearchCV) + DNN (hyperparameter search, class-weighted BCE, batch norm, dropout) |
-| 4. TFLite compression | float32 (ref), float16, int8, pruned + int8 |
-| 5. Edge benchmarking | Latency & size — cloud-CPU proxy, then Raspberry Pi / ESP32 |
-| 6. Explainability & fidelity | SHAP top-k Jaccard, Spearman ρ, McNemar's test, multi-seed CI |
-| 7. Trade-off & plausibility analysis | Accuracy vs. size vs. fidelity (Pareto plot); DNN-SHAP vs. RF importance cross-check |
-| 8. Manuscript artifacts | Result tables, trade-off figure, reproducibility manifest |
+| `IoMT_Cardiac_Risk_Edge_Compression_Pipeline_v4.ipynb` | End-to-end, single-notebook pipeline — data loading through final figures. Runs in Google Colab or local Jupyter (CPU only). |
+| `paper/` *(add your PDF here)* | Manuscript describing the methodology and results in full (AISTATS-format submission). |
+| `outputs/` *(generated on run)* | All CSVs, figures, LaTeX macros, and the reproducibility manifest produced by the notebook. |
 
----
+> This is a single, working research notebook, not a packaged library — every section is independently re-runnable and writes its outputs to `OUT_DIR` (`./outputs` locally, `/content/outputs` on Colab).
 
-## 7. Results
+## Key results
 
-Full results, figures, and tables are provided in the paper (Section 4 and Tables 1–2) and reproduced under `results/`. Headline numbers:
+| Model | Accuracy | AUC | Size (KB) | Top-k Jaccard | Spearman ρ | IWEF |
+|---|---|---|---|---|---|---|
+| DNN float32 (reference) | 0.839 ± 0.019 | 0.948 | 40.76 | 1.000 | 1.000 | 1.000 |
+| **Noise floor** (float32 vs. itself) | – | – | – | 0.833 | 0.974 | 0.873 |
+| DNN float16 (TFLite) | 0.859 ± 0.014 | 0.948 | 22.29 | 0.743 ± 0.047 | 0.897 ± 0.020 | 0.813 ± 0.024 |
+| DNN int8 (TFLite) | 0.857 ± 0.015 | 0.947 | 17.25 | 0.741 ± 0.045 | 0.893 ± 0.021 | 0.812 ± 0.023 |
+| **DNN pruned+int8 (TFLite)** | 0.836 ± 0.018 | 0.928 | 17.25 | **0.970 ± 0.017** | **0.991 ± 0.006** | **0.979 ± 0.007** |
 
-- **DNN (float32) AUC:** 0.930 | **Accuracy:** 0.882
-- **Random Forest AUC:** 0.980 | **Accuracy:** 0.933 (best raw accuracy, not the deployment target)
-- **float16 / int8:** accuracy and AUC closely track the float32 reference; moderate SHAP fidelity drift (ρ ≈ 0.86–0.87)
-- **pruned + int8:** lower raw accuracy (0.819) but substantially higher explanation fidelity (ρ ≈ 0.98) at a comparable footprint
+Quantization alone (`float16`, `int8`) falls **below** the noise floor — its explanations are, statistically, no more faithful than the reference model re-explained with a different background sample. Pruning before quantization **exceeds** the noise floor at the same on-disk size, despite lower raw accuracy. McNemar's exact test finds no significant prediction-level change from float32 for any variant — compression here changes *how faithfully the model explains itself*, not *what it predicts*.
 
-Top SHAP-ranked features — **oldpeak, chest pain type, ST slope** — align with Random Forest's independent feature ranking and established clinical cardiac-risk indicators.
+## Getting started
 
----
+**Requirements:** Python 3, run on CPU (no GPU required/assumed).
 
-## 8. Sources / References
+Core dependencies (installed at the top of the notebook):
 
-The full reference list corresponding to the paper's related-work and comparison sections:
-
-1. Ashfaq, M.T., Javaid, N., Alrajeh, N., Ali, S.S. *An explainable AI based new deep learning solution for efficient heart disease prediction at early stages.* Evolving Systems 16(1), 33 (2025).
-2. Cenitta, D., Arul, N., Arjunan, R.V., Chadaga, K., Andrew, J. *An explainable artificial intelligence framework for ischemic heart disease prediction using enhanced squirrel search feature selection.* Scientific Reports (2026).
-3. Eshwarappa, N.M., Baghban, H., Hsu, C.H., Hsu, P.Y., Hwang, R.H., Chen, M.Y. *Communication-efficient and privacy-preserving federated learning for medical image classification in multi-institutional edge computing.* Journal of Cloud Computing 14(1), 44 (2025).
-4. Essahraui, S., Lamaakal, I. *A comprehensive survey of TinyML-based biometric recognition for IoT edge devices.* IEEE Internet of Things Journal (2026).
-5. Gogi, G., Gurung, S., Gegov, A., Arabikhan, F., Ichtev, A. *Trustworthy and reliable AI for heart disease diagnosis.* IJCNN 2025, pp. 1–7. IEEE.
-6. Ivanov, D.A., Larionov, D.A., Maslennikov, O.V., Voevodin, V.V. *Neural network compression for reinforcement learning tasks.* Scientific Reports 15(1), 9718 (2025).
-7. Keivanimehr, A.R., Akbari, M. *TinyML and edge intelligence applications in cardiovascular disease: A survey.* Computers in Biology and Medicine 186, 109653 (2025).
-8. Khalid, M.I., Hussain, A., Hussain, N., Alkhalifah, T. *Lightweight and interpretable edge intelligence AI with intrusion detection for trustworthy cardiac arrhythmia in medical IoT.* Scientific Reports (2026).
-9. Khan, M.A., Saudagar, A.K.J., Yaqoob, M.M., Nazir, M., Yousafzai, A., Khaliq uz Zaman, S., Alkhrijah, Y.M., Mazhar, T. *Federated learning for heart disease detection and classification in edge enabled IoMT-based healthcare.* Computing 107(11), 219 (2025).
-10. Khan, S., Perumal, K., Alsolai, H., Aljohani, A. *FedTinyMed: Federated learning enabled tiny multi-task machine learning model for smart healthcare monitoring for IoMT.* Computers and Electrical Engineering 128, 110761 (2025).
-11. Salih, A.M., Galazzo, I.B., Gkontra, P., Rauseo, E., Lee, A.M., Lekadir, K., Radeva, P., Petersen, S.E., Menegaz, G. *A review of evaluation approaches for explainable AI with applications in cardiology.* Artificial Intelligence Review 57(9), 240 (2024).
-12. Sen, J., Bhattacharya, S. *XAI in heart disease: A review of concepts, applications and limitations.* Archives of Computational Methods in Engineering, pp. 1–35 (2026).
-13. Siddhartha, M. *Heart Disease Dataset (Comprehensive).* IEEE DataPort (2020). https://doi.org/10.21227/dz4t-cm36
-14. Talukder, M.A., Talaat, A.S., Kazi, M., Khraisat, A. *XAI-HD: an explainable artificial intelligence framework for heart disease detection.* Artificial Intelligence Review 58(12), 385 (2025).
-15. Umar, M.A., Abuali, N., Shuaib, K., Awad, A.I. *An explainable artificial intelligence and Internet of Things framework for monitoring and predicting cardiovascular disease.* Engineering Applications of Artificial Intelligence 144, 110138 (2025).
-16. Vani, M.S., Sudhakar, R.V., Mahendar, A., Ledalla, S., Radha, M., Sunitha, M. *Personalized health monitoring using explainable AI: bridging trust in predictive healthcare.* Scientific Reports 15(1), 31892 (2025).
-17. Wang, Z., Hu, Y., Hu, Q., Bai, D. *Explainable AI-enabled wearable sensors for real-time thrombotic event early warning in connected health environments.* IEEE Transactions on Consumer Electronics (2026).
-18. Xi, L., Li, C., Anari, M.S., Rezaee, K. *Integrating wearable health devices with AI and edge computing for personalized rehabilitation.* Journal of Cloud Computing 14(1), 64 (2025).
-
----
-
-## 9. Limitations
-
-- D1 is retrospective, tabular clinical data — **not** a live physiological sensor stream; this work isolates the compression-and-explainability question as a precursor to sensor-based validation.
-- Edge latency/size benchmarks were obtained primarily via a cloud-CPU proxy; full-scale physical Raspberry Pi / ESP32 validation is packaged as a standalone script but not exhaustively reported.
-- The deployment-target DNN's raw accuracy trails Random Forest, reflecting a deliberate choice to prioritize a model family with a direct quantization/pruning pathway.
-- Fidelity was evaluated using SHAP only and magnitude pruning as the sole pruning strategy; generalization to other explainers (LIME, Integrated Gradients) or structured compression (distillation, channel pruning) is left to future work.
-- Only S = 3 seeds are used; intervals are wide and some pairwise comparisons (e.g., float16 vs. int8) are not statistically resolved.
-
----
-
-## 10. Citation
-
-If you use this code or build on this work, please cite:
-
-```bibtex
-@inproceedings{hira2027compression,
-  title     = {Compression Strategy, Not Compression Ratio: Explanation-Fidelity Trade-offs in Quantized and Pruned Cardiac Risk Models},
-  author    = {Hira, Md Irfanul Kabir and Rahman, Anichur and Rana, Md Shohel},
-  booktitle = {Proceedings of the 30th International Conference on Artificial Intelligence and Statistics (AISTATS)},
-  year      = {2027}
-}
+```bash
+pip install shap tensorflow-model-optimization
+pip install tensorflow numpy pandas matplotlib seaborn scikit-learn scipy
 ```
 
----
+Open `IoMT_Cardiac_Risk_Edge_Compression_Pipeline_v4.ipynb` in Google Colab or Jupyter and run top to bottom. Set the hardware accelerator to **CPU**.
 
-## 11. License
+The notebook includes `RUN_MODE` toggles for a fast smoke test — use this first, since the full `N_SEEDS = 10`, full-238-sample exact-SHAP run is considerably slower than a single-seed pass.
 
-Specify your license here (e.g., MIT, Apache 2.0). Add a `LICENSE` file to the repository root.
+## Reproducing the paper's numbers
 
-## 12. Contact
+1. Run Sections 0–8 for a single-seed sanity check of every metric (baselines, compression, fidelity engine, noise floor).
+2. Run Section 9 (multi-seed loop, `N_SEEDS = 10`) for the headline mean ± 95% CI numbers reported in Table 1 — this is the slowest section; use `RUN_MODE="smoke"` first.
+3. Run Section 10 for the de-duplication sensitivity check (D1 contains 272 exact duplicate rows).
+4. Run Section 12 for Algorithm 1's uncertainty-aware tier selection and the paired Wilcoxon significance tests between variants.
+5. Run Section 13 to regenerate `paper_macros.tex` — every number quoted in the manuscript is written here directly from the results tables, so the paper and the code cannot silently diverge.
+6. For real edge-hardware numbers (not the CPU-proxy latency reported here), copy the script in Section 17 to a Raspberry Pi or ESP32-class device — this is **not** meant to run inside Colab.
 
-- Md Irfanul Kabir Hira — irfanhira11@niter.edu.bd
-- Anichur Rahman — ar36248@georgiasouthern.edu
-- Md Shohel Rana (Corresponding author) — EMAIL-TO-CONFIRM
+## Exported artifacts
+
+Everything is written to `OUT_DIR`, including: baseline and full model comparison tables, the 24-config DNN grid-search log, McNemar significance results, CPU-proxy latency/size benchmarks, the sparsity sweep, all confusion matrices/ROC curves, single-run and multi-seed fidelity tables (with the noise floor row), the Shapley-linearity bound check, the permutation-importance cross-check, dedup-sensitivity results, paired Wilcoxon tests, `tier_selection.json` (Algorithm 1's output), the final `table1_final.csv`, `paper_macros.tex`, the trade-off and seven-panel synthesis figures, the pipeline diagram, a full `reproducibility_manifest.json`, and `X_test.npy`/`y_test.npy` for handoff to physical edge-hardware benchmarking.
+
+## Limitations
+
+- D1 is a single retrospective tabular dataset (272 retained exact duplicates); accuracy figures may be mildly optimistic, though the fidelity *ordering* across variants is unchanged after de-duplication.
+- `float16` and `int8` fidelity remain statistically indistinguishable from each other even at 10 seeds.
+- Latency/size are a cloud-CPU proxy, not physical edge hardware (a Raspberry Pi / ESP32 script is included for follow-up).
+- The DNN trails Random Forest in raw accuracy by design — it's the deployment target because it has a direct quantization/pruning path, not because it's the strongest classifier.
+- SHAP and magnitude pruning are the only explainer and compression strategy tested in depth (a permutation-importance cross-check is included as a second, model-agnostic explainer).
+
+## Citation
+
+If you use this code or build on this work, please cite the accompanying manuscript (currently under review):
+
+```
+Anonymous Author. "Compression Strategy, Not Compression Ratio: Explanation-Fidelity
+Trade-offs in Quantized and Pruned Cardiac Risk Models." Under review, AISTATS 2027.
+```
+
+## License
+
+Add a license of your choice (e.g. MIT, Apache-2.0) before making this repository public.
